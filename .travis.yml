@@ -1,0 +1,69 @@
+language: java
+
+# build time with caching:
+#   11.4 download cache, 53 unzip cache, 2 configure, 10 wait for wls start = 76 (assuming no cache upload)
+# build time without caching:
+#   10 download zip from s3, 6 unzip, 79 configure, 52 wait for wls start = 147
+
+env: WLS_UNZIP=$PWD/wls
+     MW_HOME=$WLS_UNZIP/wls12130
+     WLS_BIN=$MW_HOME/wlserver/server/bin
+     DOMAIN_HOME=$WLS_UNZIP/domain_home
+     LDAP_DIR=$DOMAIN_HOME/servers/myserver/data/ldap/ldapfiles
+     LDAP_TAR=$LDAP_DIR/ldap.tar
+     DYNAMIC_TAR=$DOMAIN_HOME/dynamic.tar
+
+cache:
+  directories:
+    - $WLS_UNZIP
+
+# setup to run before doing the actual build
+# installs weblogic and creates a domain
+before_script:
+  - mkdir -p $WLS_UNZIP
+  # download weblogic if not yet available from cache
+  - test -f $WLS_UNZIP/wls.zip || wget -O $WLS_UNZIP/wls.zip https://s3-us-west-2.amazonaws.com/redheap-wls/wls1213_dev_update2.zip
+  # unzip wls.zip if not yet available from cache
+  - test -f $MW_HOME/configure.sh || unzip -q $WLS_UNZIP/wls.zip -d $WLS_UNZIP
+  - ls -al $WLS_UNZIP
+  # configure weblogic, will finish fast if already configured in cache
+  - (cd $MW_HOME && . ./configure.sh -silent)
+  - cat $MW_HOME/silent_install.log
+  # setup WLS environment and create and start WLS domain
+  - mkdir -p $DOMAIN_HOME
+  - test ! -f $DYNAMIC_TAR || (cd $DOMAIN_HOME && tar -xf dynamic.tar) 
+  - (. $WLS_BIN/setWLSEnv.sh && cd $DOMAIN_HOME && echo 'y' | 
+     $JAVA_HOME/bin/java $JAVA_OPTIONS -Xmx1024m -XX:MaxPermSize=256m 
+                         -Dweblogic.Domain=mydomain -Dweblogic.Name=myserver
+                         -Dweblogic.management.username=weblogic -Dweblogic.management.password=weblogic1 
+                         weblogic.Server &)
+  # wait for WLS to complete its start in the background
+  # todo: this also triggers deployment of console app which takes time
+  - while true; do sleep 1; wget -q -O - http://localhost:7001/console && echo 'WLS started' && break; done
+  - ls -al $DOMAIN_DIR
+
+
+# stuff to run after a build (clean up)
+#after_script:
+  # todo: replace with killing weblogic as first ever wlst invoke scans classpath for 30 seconds
+#  - $DOMAIN_HOME/bin/stopWebLogic.sh
+
+# stuff to run before caching the final WLS directory
+# cleans out things that change on each run and would trigger a cache refresh
+before_cache:
+  # stop weblogic before persisting cache
+  # todo: replace with killing weblogic as first ever wlst invoke scans classpath for 30 seconds
+  - $DOMAIN_HOME/bin/stopWebLogic.sh
+  # archive dynamic files if tar does not exist yet (so not started with cache)
+  - test -f $DYNAMIC_TAR || (cd $DOMAIN_DIR && tar -c -f dynamic.tar servers/myserver/data/) 
+  - ls -al $DOMAIN_DIR
+  # clear files that would trigger cache update when not needed
+  - rm -f $MW_HOME/silent_install*.log
+  - rm -f $MW_HOME/logs/*
+  - rm  -f $DOMAIN_HOME/shutdown-myserver.py
+  - rm  -f $DOMAIN_HOME/config/config.lok
+  # remove dynamic files that seem to change at each wls run
+  # initial version will be kept in tar file
+  - rm -rf $DOMAIN_HOME/servers/myserver/data/*
+  - rm  -f $DOMAIN_HOME/servers/myserver/logs/*
+  - rm -rf $DOMAIN_HOME/servers/myserver/tmp/*
